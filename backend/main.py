@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
@@ -38,98 +38,57 @@ secret_client = SecretClient(vault_url=key_vault_url, credential=credential)
 # Fetch secret values from Azure Key Vault
 SECRET_KEY = secret_client.get_secret("SECRET_KEY").value
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 15
-REFRESH_TOKEN_EXPIRE_MINUTES = 43200  # 30 days
+JWT_EXPIRATION_MINUTES = 15
 
-# Simulated in-memory database to store user data
 users_db = {}
-refresh_tokens_db = {}
 
 class User(BaseModel):
     username: str
     email: str
     password: str
 
-def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
+def create_jwt_token(data: dict, expires_delta: Union[timedelta, None] = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRATION_MINUTES)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def create_refresh_token(data: dict, expires_delta: Union[timedelta, None] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(days=30))
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+@app.post("/api/generate-token")
+async def generate_token(client_secret: str = Header(...)):
+    if client_secret != os.getenv("CLIENT_SECRET"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    data = {"role": "frontend"}
+    token = create_jwt_token(data)
+    return {"token": token}
 
 @app.post("/api/register")
-async def register(user: User):
-    if user.email in users_db:
-        raise HTTPException(status_code=400, detail="User already registered")
-
-    users_db[user.email] = user
-
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.email}, expires_delta=access_token_expires
-    )
-
-    refresh_token_expires = timedelta(days=30)
-    refresh_token = create_refresh_token(
-        data={"sub": user.email}, expires_delta=refresh_token_expires
-    )
-    refresh_tokens_db[refresh_token] = user.email
-
-    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
-
-@app.post("/api/token/refresh")
-async def refresh_token(request: Request):
-    data = await request.json()
-    refresh_token = data.get("refresh_token")
-    if not refresh_token or refresh_token not in refresh_tokens_db:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
-    
-    try:
-        payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid refresh token")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
-
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": email}, expires_delta=access_token_expires
-    )
-
-    return {"access_token": access_token, "token_type": "bearer"}
-
-@app.get("/api/secure-data")
-async def read_secure_data(request: Request):
-    auth_header = request.headers.get("Authorization")
-
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Authorization header missing")
-
-    token = auth_header.split("Bearer ")[-1]
-    
-    if not token:
-        raise HTTPException(status_code=401, detail="Token missing")
-    
+async def register(user: User, Authorization: str = Header(...)):
+    token = Authorization.split(" ")[1]
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="User email missing from token")
+        if payload.get("role") != "frontend":
+            raise HTTPException(status_code=401, detail="Unauthorized role")
+
+        if user.email in users_db:
+            raise HTTPException(status_code=400, detail="User already registered")
+
+        users_db[user.email] = user
+        return {"message": "User registered successfully"}
     except JWTError as e:
         raise HTTPException(status_code=401, detail=f"Token decode error: {str(e)}")
 
-    if email not in users_db:
-        raise HTTPException(status_code=400, detail="User not found")
-
-    return {"message": f"Secure data for {email}"}
+@app.get("/api/secure-data")
+async def read_secure_data(Authorization: str = Header(...)):
+    token = Authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return {"message": "This is secure data", "data": payload}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 if __name__ == "__main__":
     import uvicorn

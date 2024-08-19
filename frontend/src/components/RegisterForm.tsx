@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, ChangeEvent, FormEvent } from "react";
-import { registerUser, getAccessToken, authenticatedFetch } from "../lib/auth";
+import { generateToken, authenticatedFetch, registerUser } from "../lib/auth";
 import { User } from "../types";
 
 const RegisterForm: React.FC = () => {
@@ -21,12 +21,17 @@ const RegisterForm: React.FC = () => {
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     try {
-      const accessToken = await getAccessToken(); // Get access token before registration
+      // Generate JWT token using client secret
+      await generateToken();
+
+      // Register the user
       const response = await registerUser(user);
       setMessage(response.message);
 
-      // Fetch secure data with the received token
-      const secureResponse = await authenticatedFetch("/api/secureData");
+      // Fetch secure data using the generated JWT token
+      const secureResponse = await authenticatedFetch(
+        `${process.env.NEXT_PUBLIC_API_BASE_URL}/api/secure-data`
+      );
       setSecureData(secureResponse.message);
     } catch (error) {
       setMessage("Registration failed.");
